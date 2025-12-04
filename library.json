@@ -1,0 +1,42 @@
+{
+  "name": "ESP32-ModbusDevice",
+  "version": "0.1.0",
+  "description": "Base class framework for creating Modbus RTU device drivers on ESP32 with async operations",
+  "keywords": [
+    "modbus",
+    "rtu",
+    "esp32",
+    "freertos",
+    "industrial",
+    "iot",
+    "rs485"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/packerlschupfer/ESP32-ModbusDevice.git"
+  },
+  "authors": [
+    {
+      "name": "packerlschupfer",
+      "email": "packerlschupfer@noreply.github.com",
+      "maintainer": true
+    }
+  ],
+  "homepage": "https://github.com/packerlschupfer/ESP32-ModbusDevice",
+  "license": "GPL-3",
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "platforms": ["espressif32"],
+  "dependencies": {
+    "ESP32-MutexGuard": "https://github.com/packerlschupfer/ESP32-MutexGuard.git",
+    "ESP32-LibraryCommon": "https://github.com/packerlschupfer/ESP32-LibraryCommon.git",
+    "ESP32-IDeviceInstance": "https://github.com/packerlschupfer/ESP32-IDeviceInstance.git"
+  },
+  "export": {
+    "include": [
+      "src/*.h"
+    ]
+  }
+}
