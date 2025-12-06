@@ -125,7 +125,7 @@ bool ModbusRegistry::acquireBusMutex(uint32_t timeoutMs) {
     return xSemaphoreTake(busMutex_, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
 }
 
-void ModbusRegistry::releaseBusMutex() {
+void ModbusRegistry::releaseBusMutex() noexcept {
     if (busMutex_) {
         xSemaphoreGive(busMutex_);
     }
