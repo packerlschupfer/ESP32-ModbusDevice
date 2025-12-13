@@ -108,7 +108,25 @@ public:
      * @param errorBit Bit to set when initialization fails (optional)
      */
     void setEventGroup(EventGroupHandle_t eventGroup, EventBits_t readyBit, EventBits_t errorBit = 0);
-    
+
+    /**
+     * @brief Get the external event group configured for this device
+     * @return Event group handle, or nullptr if not configured
+     */
+    EventGroupHandle_t getExternalEventGroup() const { return eventGroup; }
+
+    /**
+     * @brief Get the ready bit configured for this device
+     * @return Ready bit mask
+     */
+    EventBits_t getReadyBit() const { return readyBit; }
+
+    /**
+     * @brief Get the error bit configured for this device
+     * @return Error bit mask
+     */
+    EventBits_t getErrorBit() const { return errorBit; }
+
     /**
      * @brief Register device globally for callback routing
      * @return ModbusError indicating success or error
