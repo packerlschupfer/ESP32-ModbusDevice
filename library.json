@@ -32,7 +32,8 @@
   "dependencies": {
     "ESP32-MutexGuard": "https://github.com/packerlschupfer/ESP32-MutexGuard.git",
     "ESP32-LibraryCommon": "https://github.com/packerlschupfer/ESP32-LibraryCommon.git",
-    "ESP32-IDeviceInstance": "https://github.com/packerlschupfer/ESP32-IDeviceInstance.git"
+    "ESP32-IDeviceInstance": "https://github.com/packerlschupfer/ESP32-IDeviceInstance.git",
+    "esp32ModbusRTU": "https://github.com/packerlschupfer/esp32ModbusRTU.git"
   },
   "export": {
     "include": [
