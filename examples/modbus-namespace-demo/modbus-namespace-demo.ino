@@ -1,244 +1,125 @@
 /**
  * @file modbus-namespace-demo.ino
- * @brief Demonstrates the ModbusDevice library with namespace usage
- * 
- * This example shows:
- * 1. How to use the modbus namespace
- * 2. Simple temperature sensor using modbus::SimpleModbusDevice
- * 3. Result<T,E> error handling pattern
- * 4. Clean initialization without IDeviceInstance
+ * @brief Namespace-usage demo for ESP32-ModbusDevice
+ *
+ * After the redesign every class lives in `namespace modbus`. This demo shows
+ * the idiomatic ways to reference those types:
+ *  - fully qualified (modbus::SimpleModbusDevice)
+ *  - via a `using namespace modbus;` shortcut inside a translation unit
+ *
+ * It also shows that the old global named `modbus` is gone: the master
+ * instance here is called `modbusMaster` so it cannot collide with the
+ * `modbus` namespace.
+ *
+ * The concrete device subclasses modbus::SimpleModbusDevice, which provides
+ * a channel-oriented IModbusAnalogInput on top of the synchronous
+ * ModbusResult<T> read API.
  */
 
 #include <Arduino.h>
 #include <esp32ModbusRTU.h>
-#include "SimpleModbusDevice.h"
-#include "QueuedModbusDevice.h"
+#include <SimpleModbusDevice.h>   // pulls in ModbusDevice.h + namespace modbus
 
-// Use the modbus namespace
+static constexpr int MODBUS_RX_PIN = 16;
+static constexpr int MODBUS_TX_PIN = 17;
+static constexpr uint8_t SENSOR_ADDRESS = 1;
+
+esp32ModbusRTU modbusMaster(&Serial1);
+
+// Bridge the single-argument RTU error callback to the library router.
+static void modbusErrorHandler(esp32Modbus::Error error) {
+    handleError(0, error);
+}
+
+// Demonstrate the using-directive form of namespace access.
 using namespace modbus;
 
-// Global Modbus RTU instance
-esp32ModbusRTU modbus(&Serial2, 16); // DE/RE pin on GPIO 16
-
 /**
- * Example 1: Simple Temperature Sensor
- * Demonstrates basic sensor implementation
+ * @brief A simple two-channel analog sensor.
+ *
+ * SimpleModbusDevice requires configure() (declare channels) and
+ * readChannelData() (refresh values). Both build on the synchronous
+ * readHoldingRegisters() -> ModbusResult<std::vector<uint16_t>> API.
  */
-class TemperatureSensor : public SimpleModbusDevice {
+class EnvironmentSensor : public SimpleModbusDevice {
 public:
-    TemperatureSensor(uint8_t addr) : SimpleModbusDevice(addr) {}
-    
-    // Configure the sensor
+    explicit EnvironmentSensor(uint8_t addr) : SimpleModbusDevice(addr) {}
+
+protected:
     bool configure() override {
-        // Set up channel for temperature reading
-        configureChannels(1, 0x0000, 0.1f); // 1 channel at register 0x0000, scale 0.1
+        // Probe presence with a synchronous read.
+        auto id = readHoldingRegisters(0x0000, 1);
+        if (!id.isOk()) {
+            return false;
+        }
+        addChannel("Temperature", "C", 0x0001);
+        addChannel("Humidity", "%RH", 0x0002);
         return true;
     }
-};
 
-/**
- * Example 2: Multi-channel Analog Input Device
- * Demonstrates multiple channel support
- */
-class AnalogInputDevice : public SimpleModbusDevice {
+    bool readChannelData() override {
+        // Read both channel registers in one transaction.
+        auto regs = readHoldingRegisters(0x0001, 2);
+        if (!regs.isOk()) {
+            return false;
+        }
+        values.clear();
+        for (uint16_t raw : regs.value()) {
+            values.push_back(static_cast<int32_t>(raw));
+        }
+        return true;
+    }
+
 public:
-    AnalogInputDevice(uint8_t addr) : SimpleModbusDevice(addr) {}
-    
-    bool configure() override {
-        // Configure 4 analog input channels starting at register 0x1000
-        configureChannels(4, 0x1000, 1.0f); // No scaling
-        return true;
-    }
-    
-    // Override to provide channel names
-    const char* getChannelName(size_t channel) const override {
-        static const char* names[] = {"AI1", "AI2", "AI3", "AI4"};
-        return (channel < 4) ? names[channel] : "";
-    }
-    
-    const char* getChannelUnits(size_t channel) const override {
-        return "V"; // Voltage
+    // Scale raw counts (0.1 per LSB) into engineering units.
+    ModbusResult<float> getFloat(size_t channel = 0) const override {
+        if (channel >= values.size()) {
+            return ModbusResult<float>::error(ModbusError::INVALID_PARAMETER);
+        }
+        return ModbusResult<float>::ok(values[channel] / 10.0f);
     }
 };
 
-/**
- * Example 3: Async Device with Queue
- * Demonstrates QueuedModbusDevice for complex async operations
- */
-class AsyncController : public QueuedModbusDevice {
-private:
-    std::vector<float> outputs;
-    
-public:
-    AsyncController(uint8_t addr) : QueuedModbusDevice(addr) {
-        outputs.resize(4, 0.0f);
-    }
-    
-    // Perform initialization
-    bool initialize() override {
-        Serial.printf("Initializing async controller at address %d\n", getServerAddress());
-        
-        // Enable async mode with queue
-        auto result = initializeQueue(10);
-        if (!result.isOk()) {
-            Serial.println("Failed to create queue");
-            return false;
-        }
-        
-        // Register the device
-        setInitPhase(InitPhase::CONFIGURING);
-        if (registerDevice() != ModbusError::SUCCESS) {
-            Serial.println("Failed to register device");
-            setInitPhase(InitPhase::ERROR);
-            return false;
-        }
-        
-        // Read device info asynchronously
-        ModbusRequest req;
-        req.functionCode = 0x03; // Read holding registers
-        req.address = 0x0000;
-        req.data = {0x00, 0x01}; // Read 1 register
-        req.id = 1;
-        
-        if (!enqueueRequest(req).isOk()) {
-            Serial.println("Failed to enqueue request");
-            return false;
-        }
-        
-        setInitPhase(InitPhase::READY);
-        return true;
-    }
-    
-    // Handle async responses
-    void handleModbusResponse(uint8_t functionCode, uint16_t address,
-                            const uint8_t* data, size_t length) override {
-        Serial.printf("Received response: FC=%02X, Addr=%04X, Len=%d\n",
-                     functionCode, address, length);
-        
-        // Process based on address
-        if (address == 0x0000 && length >= 2) {
-            uint16_t deviceId = (data[0] << 8) | data[1];
-            Serial.printf("Device ID: 0x%04X\n", deviceId);
-        }
-    }
-    
-    void handleModbusError(ModbusError error) override {
-        Serial.printf("Modbus error: %s\n", getModbusErrorString(error));
-    }
-};
-
-// Example devices
-TemperatureSensor* tempSensor = nullptr;
-AnalogInputDevice* analogInputs = nullptr;
-AsyncController* controller = nullptr;
-
-// Callback functions for Modbus library
-void mainHandleData(uint8_t serverAddress, esp32Modbus::FunctionCode fc,
-                   uint16_t startingAddress, const uint8_t* data, size_t length) {
-    // Forward to device handlers
-    modbus::ModbusDevice* device = nullptr;
-    
-    {
-        MutexGuard guard(deviceMapMutex);
-        auto it = globalDeviceMap.find(serverAddress);
-        if (it != globalDeviceMap.end()) {
-            device = it->second;
-        }
-    }
-    
-    if (device) {
-        device->handleData(serverAddress, fc, startingAddress, data, length);
-    }
-}
-
-void handleError(uint8_t serverAddress, esp32Modbus::Error error) {
-    // Forward to device error handlers
-    modbus::ModbusDevice* device = nullptr;
-    
-    {
-        MutexGuard guard(deviceMapMutex);
-        auto it = globalDeviceMap.find(serverAddress);
-        if (it != globalDeviceMap.end()) {
-            device = it->second;
-        }
-    }
-    
-    if (device) {
-        device->handleError(serverAddress, error);
-    }
-}
+static EnvironmentSensor sensor(SENSOR_ADDRESS);
 
 void setup() {
     Serial.begin(115200);
-    while (!Serial) delay(10);
-    
-    Serial.println("ModbusDevice Namespace Demo");
-    Serial.println("==========================");
-    
-    // Configure RS485
-    Serial2.begin(9600, SERIAL_8N1, 17, 18); // RX=17, TX=18
-    
-    // Initialize Modbus
-    modbus.onData(mainHandleData);
-    modbus.onError(handleError);
-    modbus.begin();
-    
-    // Set global Modbus instance
-    setGlobalModbusRTU(&modbus);
-    
-    // Create devices
-    tempSensor = new TemperatureSensor(1);
-    analogInputs = new AnalogInputDevice(2);
-    controller = new AsyncController(3);
-    
-    // Initialize devices
-    if (!tempSensor->initialize()) {
-        Serial.println("Failed to initialize temperature sensor");
+    delay(100);
+    Serial.println("ESP32-ModbusDevice :: namespace demo");
+
+    Serial1.begin(MODBUS_BAUD_RATE, SERIAL_8N1, MODBUS_RX_PIN, MODBUS_TX_PIN);
+
+    // Fully-qualified access to the registry singleton.
+    modbus::ModbusRegistry::getInstance().setModbusRTU(&modbusMaster);
+    modbusMaster.onData(mainHandleData);
+    modbusMaster.onError(modbusErrorHandler);
+    modbusMaster.begin();
+
+    if (sensor.initialize()) {
+        Serial.printf("Sensor ready with %u channels\n",
+                      static_cast<unsigned>(sensor.getChannelCount()));
+    } else {
+        Serial.printf("Init failed: %s\n",
+                      getModbusErrorString(sensor.getLastError()));
     }
-    
-    if (!analogInputs->initialize()) {
-        Serial.println("Failed to initialize analog inputs");
-    }
-    
-    if (!controller->initialize()) {
-        Serial.println("Failed to initialize controller");
-    }
-    
-    Serial.println("Setup complete!");
 }
 
 void loop() {
-    static uint32_t lastUpdate = 0;
-    
-    // Update every 5 seconds
-    if (millis() - lastUpdate > 5000) {
-        lastUpdate = millis();
-        
-        // Read temperature
-        auto tempResult = tempSensor->readChannel(0);
-        if (tempResult.isOk()) {
-            Serial.printf("Temperature: %.1f°C\n", tempResult.value);
-        } else {
-            Serial.printf("Temperature read failed: %s\n", 
-                         getModbusErrorString(tempResult.error));
-        }
-        
-        // Read all analog inputs
-        auto analogResult = analogInputs->readAllChannels();
-        if (analogResult.isOk()) {
-            Serial.print("Analog inputs: ");
-            for (size_t i = 0; i < analogResult.value.size(); i++) {
-                Serial.printf("%.2fV ", analogResult.value[i]);
+    // update() refreshes all channels via the synchronous read path.
+    auto upd = sensor.update();
+    if (upd.isOk()) {
+        for (size_t ch = 0; ch < sensor.getChannelCount(); ++ch) {
+            auto val = sensor.getFloat(ch);
+            if (val.isOk()) {
+                Serial.printf("%s: %.1f %s\n",
+                              sensor.getChannelName(ch),
+                              val.value(),
+                              sensor.getChannelUnits(ch));
             }
-            Serial.println();
         }
-        
-        // Process async controller queue
-        controller->processQueue();
+    } else {
+        Serial.printf("Update failed: %s\n", getModbusErrorString(upd.error()));
     }
-    
-    // Let Modbus process
-    modbus.task();
-    
-    delay(10);
+
+    delay(2000);
 }

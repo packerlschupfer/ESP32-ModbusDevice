@@ -1,204 +1,91 @@
 /**
  * @file main.cpp
- * @brief Example showing the redesigned ModbusDevice architecture
- * 
- * This example demonstrates the clean, simplified approach of the new
- * ModbusDevice design without circular dependencies or false warnings.
+ * @brief Redesigned-architecture example for ESP32-ModbusDevice
+ *
+ * Highlights the post-redesign API:
+ *  - Everything lives in `namespace modbus`
+ *  - Operations are synchronous and return ModbusResult<T> instead of
+ *    using async callbacks
+ *  - Reads return the data directly (e.g. ModbusResult<std::vector<uint16_t>>)
+ *  - Writes return ModbusResult<void>
+ *
+ * The example wires an esp32ModbusRTU master through the ModbusRegistry,
+ * then performs representative read and write transactions.
  */
 
 #include <Arduino.h>
 #include <esp32ModbusRTU.h>
-#include "SimpleModbusDevice.h"
-#include "ModbusDeviceLogging.h"
+#include <ModbusDevice.h>   // namespace modbus, ModbusRegistry, ModbusResult
 
-// UART pins for Modbus
-#define RX_PIN 16
-#define TX_PIN 17
-#define RTS_PIN 4
+static constexpr int MODBUS_RX_PIN = 16;
+static constexpr int MODBUS_TX_PIN = 17;
+static constexpr uint8_t DEVICE_ADDRESS = 1;
 
-// Global Modbus instance
-esp32ModbusRTU modbus(&Serial2, RTS_PIN);
+esp32ModbusRTU modbusMaster(&Serial1);
+
+// Bridge the single-argument RTU error callback to the library router.
+static void modbusErrorHandler(esp32Modbus::Error error) {
+    handleError(0, error);
+}
 
 /**
- * @class TemperatureSensor
- * @brief Simple temperature sensor implementation
- * 
- * Reads temperature from register 0x0001 with 0.1°C resolution
+ * @brief A thin device that exposes a couple of typed accessors built on the
+ *        synchronous ModbusResult<T> primitives.
  */
-class TemperatureSensor : public SimpleModbusDevice {
+class RelayBoard : public modbus::ModbusDevice {
 public:
-    TemperatureSensor(uint8_t addr) : SimpleModbusDevice(addr) {}
-    
-protected:
-    bool configure() override {
-        MODBUSD_LOG_I("Configuring temperature sensor");
-        
-        // Read device ID to verify communication
-        auto id = readHoldingRegisters(0x0000, 1);
-        if (!id.isOk()) {
-            MODBUSD_LOG_E("Failed to read device ID");
-            return false;
-        }
-        
-        MODBUSD_LOG_I("Device ID: 0x%04X", id.value[0]);
-        
-        // Setup channel
-        addChannel("Temperature", "°C", 0x0001);
-        setChannelRange(0, -40.0f, 125.0f);  // Typical sensor range
-        
-        return true;
+    explicit RelayBoard(uint8_t addr) : modbus::ModbusDevice(addr) {}
+
+    /// Read N holding registers starting at `address`.
+    modbus::ModbusResult<std::vector<uint16_t>> readBlock(uint16_t address,
+                                                          uint16_t count) {
+        return readHoldingRegisters(address, count);
     }
-    
-    float getScaleFactor(size_t channel) const override {
-        return 0.1f;  // Value is in tenths of degree
+
+    /// Toggle a single coil (relay) at `address`.
+    modbus::ModbusResult<void> setRelay(uint16_t address, bool on) {
+        return writeSingleCoil(address, on);
     }
 };
 
-/**
- * @class PressureSensor
- * @brief Multi-channel pressure sensor
- * 
- * Reads 4 pressure channels starting at register 0x0010
- */
-class PressureSensor : public SimpleModbusDevice {
-public:
-    PressureSensor(uint8_t addr) : SimpleModbusDevice(addr) {}
-    
-protected:
-    bool configure() override {
-        MODBUSD_LOG_I("Configuring pressure sensor");
-        
-        // Read configuration register
-        auto config = readHoldingRegisters(0x0000, 1);
-        if (!config.isOk()) {
-            MODBUSD_LOG_E("Failed to read configuration");
-            return false;
-        }
-        
-        // Setup 4 pressure channels
-        for (int i = 0; i < 4; i++) {
-            std::string name = "Pressure " + std::to_string(i + 1);
-            addChannel(name, "bar", 0x0010 + i);
-            setChannelRange(i, 0.0f, 10.0f);  // 0-10 bar range
-        }
-        
-        return true;
-    }
-    
-    float getScaleFactor(size_t channel) const override {
-        return 0.01f;  // Value is in hundredths of bar
-    }
-    
-    bool readChannelData() override {
-        // Read all 4 channels in one request
-        auto result = readHoldingRegisters(0x0010, 4);
-        if (!result.isOk()) {
-            MODBUSD_LOG_E("Failed to read pressure data");
-            return false;
-        }
-        
-        // Update all values
-        const auto& data = result.value;
-        for (size_t i = 0; i < 4 && i < data.size(); i++) {
-            values[i] = static_cast<int32_t>(data[i]);
-        }
-        
-        return true;
-    }
-};
-
-// Device instances
-TemperatureSensor* tempSensor = nullptr;
-PressureSensor* pressureSensor = nullptr;
+static RelayBoard board(DEVICE_ADDRESS);
 
 void setup() {
     Serial.begin(115200);
-    while (!Serial) {
-        delay(10);
+    delay(100);
+    Serial.println("ESP32-ModbusDevice :: redesigned-architecture example");
+
+    // Bring up RS485 and the Modbus master.
+    Serial1.begin(MODBUS_BAUD_RATE, SERIAL_8N1, MODBUS_RX_PIN, MODBUS_TX_PIN);
+
+    modbus::ModbusRegistry::getInstance().setModbusRTU(&modbusMaster);
+    modbusMaster.onData(mainHandleData);
+    modbusMaster.onError(modbusErrorHandler);
+    modbusMaster.begin();
+
+    board.setInitPhase(modbus::ModbusDevice::InitPhase::READY);
+
+    // Synchronous write: returns ModbusResult<void>.
+    auto wr = board.setRelay(0x0000, true);
+    if (wr.isOk()) {
+        Serial.println("Relay 0 energized");
+    } else {
+        Serial.printf("Write failed: %s\n", getModbusErrorString(wr.error()));
     }
-    
-    MODBUSD_LOG_I("ModbusDevice Redesign Example Starting...");
-    
-    // Configure UART for Modbus
-    Serial2.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
-    modbus.setTimeout(1000);
-    modbus.begin();
-    
-    // Set global Modbus instance
-    setGlobalModbusRTU(&modbus);
-    
-    // Register callbacks
-    modbus.onData(mainHandleData);
-    modbus.onError(handleError);
-    
-    // Create and initialize temperature sensor
-    tempSensor = new TemperatureSensor(0x01);
-    if (!tempSensor->initialize()) {
-        MODBUSD_LOG_E("Failed to initialize temperature sensor");
-    }
-    
-    // Create and initialize pressure sensor
-    pressureSensor = new PressureSensor(0x02);
-    if (!pressureSensor->initialize()) {
-        MODBUSD_LOG_E("Failed to initialize pressure sensor");
-    }
-    
-    MODBUSD_LOG_I("Setup complete!");
 }
 
 void loop() {
-    static uint32_t lastUpdate = 0;
-    uint32_t now = millis();
-    
-    // Update sensors every 5 seconds
-    if (now - lastUpdate >= 5000) {
-        lastUpdate = now;
-        
-        // Update temperature sensor
-        if (tempSensor && tempSensor->getInitPhase() == ModbusDevice::InitPhase::READY) {
-            auto result = tempSensor->update();
-            if (result.isOk()) {
-                auto temp = tempSensor->getFloat(0);
-                if (temp.isOk()) {
-                    MODBUSD_LOG_I("Temperature: %.1f°C", temp.value);
-                }
-            } else {
-                MODBUSD_LOG_E("Temperature update failed");
-            }
+    // Synchronous read: the data comes straight back in the result value.
+    auto block = board.readBlock(0x0000, 4);
+    if (block.isOk()) {
+        Serial.print("Registers:");
+        for (uint16_t v : block.value()) {
+            Serial.printf(" 0x%04X", v);
         }
-        
-        // Update pressure sensor
-        if (pressureSensor && pressureSensor->getInitPhase() == ModbusDevice::InitPhase::READY) {
-            auto result = pressureSensor->update();
-            if (result.isOk()) {
-                MODBUSD_LOG_I("Pressure readings:");
-                for (size_t i = 0; i < pressureSensor->getChannelCount(); i++) {
-                    auto pressure = pressureSensor->getFloat(i);
-                    if (pressure.isOk()) {
-                        MODBUSD_LOG_I("  %s: %.2f %s", 
-                            pressureSensor->getChannelName(i),
-                            pressure.value,
-                            pressureSensor->getChannelUnits(i));
-                    }
-                }
-            } else {
-                MODBUSD_LOG_E("Pressure update failed");
-            }
-        }
-        
-        // Show statistics
-        if (tempSensor) {
-            auto stats = tempSensor->getStatistics();
-            MODBUSD_LOG_I("Temp sensor stats: %d/%d successful (%.1f%%)",
-                stats.successfulRequests, stats.totalRequests,
-                stats.totalRequests > 0 ? 
-                    (100.0f * stats.successfulRequests / stats.totalRequests) : 0.0f);
-        }
+        Serial.println();
+    } else {
+        Serial.printf("Read failed: %s\n", getModbusErrorString(block.error()));
     }
-    
-    // Process Modbus
-    modbus.task();
-    
-    // Small delay
-    delay(10);
+
+    delay(2000);
 }
